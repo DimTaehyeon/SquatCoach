@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import 'db_test_page.dart';
+import 'pages/ai_coach_page.dart';
+import 'pages/my_page.dart';
 import 'pose_camera_page.dart';
 
 void main() {
@@ -33,6 +35,28 @@ class HomePage extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.smart_toy_outlined),
+              title: const Text('AI 스쿼트 코치 (시연)'),
+              subtitle: const Text('실시간 자세 판정 · 횟수 세기 · 세트 저장'),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const AiCoachPage()),
+              ),
+            ),
+          ),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.person_outline),
+              title: const Text('마이페이지'),
+              subtitle: const Text('주간 통계 차트 · 날짜별 세트 기록'),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const MyPage()),
+              ),
+            ),
+          ),
           Card(
             child: ListTile(
               leading: const Icon(Icons.accessibility_new),

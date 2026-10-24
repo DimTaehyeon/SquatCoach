@@ -4,37 +4,58 @@ import '../models/user.dart';
 import '../models/workout_session.dart';
 import 'app_database.dart';
 
-/// 가짜 사용자 3명 + 사용자마다 운동 기록 5개를 DB에 넣음
-/// 반환값: 넣은 사용자 수, 세션 수
+/// 가짜 사용자 3명 + 최근 3주 동안의 운동 기록을 DB에 넣음
+/// - 하루에 2~4세트 (운동 세션 1개 = 세트 1개)
+/// - 운동 안 한 날도 섞여 있어서 주간 차트에 빈 날이 생김
+/// 반환값: 넣은 사용자 수, 세션(세트) 수
 Future<(int, int)> insertFakeData() async {
   final db = AppDatabase.instance;
   final random = Random();
   final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
 
   final fakeUsers = [
     User(name: '김철수', age: 24, heightCm: 175.2, weightKg: 70.5, createdAt: now),
     User(name: '이영희', age: 31, heightCm: 162.0, weightKg: 54.3, createdAt: now),
     User(name: '박민수', age: 45, heightCm: 180.8, weightKg: 85.0, createdAt: now),
   ];
+  const memos = ['무릎이 안쪽으로 모임', '허리 각도 좋았음', '마지막에 힘 빠짐', null, null];
 
   var sessionCount = 0;
   for (final user in fakeUsers) {
     final userId = await db.insertUser(user);
 
-    for (var day = 0; day < 5; day++) {
-      final total = 10 + random.nextInt(11); // 10~20회
-      final good = total - random.nextInt(6); // 0~5회 실수
-      await db.insertSession(WorkoutSession(
-        userId: userId,
-        exerciseType: 'squat',
-        startedAt: now.subtract(Duration(days: day, hours: random.nextInt(5))),
-        durationSec: 60 + random.nextInt(240),
-        totalReps: total,
-        goodReps: good,
-        averageScore: 60 + random.nextDouble() * 40, // 60~100점
-        memo: day == 0 ? '오늘 기록' : null,
-      ));
-      sessionCount++;
+    for (var daysAgo = 0; daysAgo < 21; daysAgo++) {
+      // 오늘은 항상 기록이 있고, 나머지 날은 약 35% 확률로 쉼
+      if (daysAgo != 0 && random.nextDouble() < 0.35) continue;
+
+      final date = DateTime(today.year, today.month, today.day - daysAgo);
+      var time = date.add(Duration(hours: 7 + random.nextInt(13), minutes: random.nextInt(60)));
+      final setCount = 2 + random.nextInt(3); // 2~4세트
+
+      for (var s = 0; s < setCount; s++) {
+        final total = 8 + random.nextInt(8); // 8~15회
+        final good = total - random.nextInt(5); // 0~4회 실수
+        // 정확한 횟수가 많을수록 점수가 높게
+        final score = (55 + good / total * 38 + random.nextDouble() * 7)
+            .clamp(0, 100)
+            .toDouble();
+        final duration = total * (3 + random.nextInt(3)) + random.nextInt(20);
+
+        await db.insertSession(WorkoutSession(
+          userId: userId,
+          exerciseType: 'squat',
+          startedAt: time,
+          durationSec: duration,
+          totalReps: total,
+          goodReps: good,
+          averageScore: score,
+          memo: memos[random.nextInt(memos.length)],
+        ));
+        sessionCount++;
+        // 다음 세트는 운동 시간 + 휴식 1~3분 뒤
+        time = time.add(Duration(seconds: duration + 60 + random.nextInt(120)));
+      }
     }
   }
   return (fakeUsers.length, sessionCount);
