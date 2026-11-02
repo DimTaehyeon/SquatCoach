@@ -36,6 +36,10 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // 코드 압축(R8) 끄기: 켜 두면 WorkManager(ML Kit·알림이 사용)의 DB 클래스가
+            // 지워져서 배포용 APK가 실행하자마자 튕김. 파일이 조금 커지는 대신 안전함
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }
