@@ -1,123 +1,149 @@
 import 'dart:math';
 
+import '../config/calories.dart';
+import '../config/squat_criteria.dart';
 import '../models/user.dart';
 import '../models/workout_session.dart';
 import 'app_database.dart';
 
 /// 가짜 사용자 3명 + 최근 3주 동안의 운동 기록을 DB에 넣음
-/// - 하루에 2~4세트 (운동 세션 1개 = 세트 1개)
-/// - 운동 안 한 날도 섞여 있어서 주간 차트에 빈 날이 생김
-/// 반환값: 넣은 사용자 수, 세션(세트) 수
-Future<(int, int)> insertFakeData() async {
+/// - 운동한 날은 세션 1~2개, 세션마다 2~4세트, 세트마다 8~15회
+/// - 반복마다 판정 기준 문서의 오류 이름으로 결과를 만듦
+/// [userId]를 주면 그 사용자 한 명에게만 기록을 넣음 (마이페이지 '가짜 운동 기록 넣기')
+/// 반환값: 사용자 수, 세션 수, 세트 수
+Future<(int, int, int)> insertFakeData({int? userId}) async {
   final db = AppDatabase.instance;
   final random = Random();
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
 
-  final fakeUsers = [
+  final existing = userId == null ? null : await db.getUser(userId);
+  final fakeUsers = existing != null ? [existing] : [
     User(name: '김철수', age: 24, heightCm: 175.2, weightKg: 70.5, createdAt: now),
     User(name: '이영희', age: 31, heightCm: 162.0, weightKg: 54.3, createdAt: now),
     User(name: '박민수', age: 45, heightCm: 180.8, weightKg: 85.0, createdAt: now),
   ];
-  const memos = ['무릎이 안쪽으로 모임', '허리 각도 좋았음', '마지막에 힘 빠짐', null, null];
+  final judged = SquatFault.values.where((f) => f.role == CheckRole.judged).toList();
+  final refs = SquatFault.values.where((f) => f.role == CheckRole.reference).toList();
 
   var sessionCount = 0;
+  var setCount = 0;
   for (final user in fakeUsers) {
-    final userId = await db.insertUser(user);
+    final uid = existing != null ? existing.id! : await db.insertUser(user);
 
     for (var daysAgo = 0; daysAgo < 21; daysAgo++) {
-      // 오늘은 항상 기록이 있고, 나머지 날은 약 35% 확률로 쉼
-      if (daysAgo != 0 && random.nextDouble() < 0.35) continue;
-
+      if (daysAgo != 0 && random.nextDouble() < 0.35) continue; // 쉬는 날
       final date = DateTime(today.year, today.month, today.day - daysAgo);
-      var time = date.add(Duration(hours: 7 + random.nextInt(13), minutes: random.nextInt(60)));
-      final setCount = 2 + random.nextInt(3); // 2~4세트
+      final sessionsToday = random.nextDouble() < 0.2 ? 2 : 1;
+      var time = date.add(Duration(hours: 7 + random.nextInt(6), minutes: random.nextInt(60)));
 
-      for (var s = 0; s < setCount; s++) {
-        final total = 8 + random.nextInt(8); // 8~15회
-        final good = total - random.nextInt(5); // 0~4회 실수
-        // 정확한 횟수가 많을수록 점수가 높게
-        final score = (55 + good / total * 38 + random.nextDouble() * 7)
-            .clamp(0, 100)
-            .toDouble();
-        final duration = total * (3 + random.nextInt(3)) + random.nextInt(20);
+      for (var s = 0; s < sessionsToday; s++) {
+        final sets = <WorkoutSet>[];
+        var activeSec = 0;
+        final setTotal = 2 + random.nextInt(3);
 
-        await db.insertSession(WorkoutSession(
-          userId: userId,
-          exerciseType: 'squat',
-          startedAt: time,
-          durationSec: duration,
-          totalReps: total,
-          goodReps: good,
-          averageScore: score,
-          memo: memos[random.nextInt(memos.length)],
+        for (var si = 1; si <= setTotal; si++) {
+          final setStart = time;
+          final repCount = 8 + random.nextInt(8);
+          final reps = <RepRecord>[];
+          for (var r = 1; r <= repCount; r++) {
+            time = time.add(Duration(seconds: 3 + random.nextInt(3)));
+            final bad = random.nextDouble() < 0.2;
+            final faults = bad ? [judged[random.nextInt(judged.length)].label] : <String>[];
+            final warnings = random.nextDouble() < 0.15
+                ? [refs[random.nextInt(refs.length)].label]
+                : <String>[];
+            reps.add(RepRecord(
+              repIndex: r,
+              endedAt: time,
+              isGood: !bad,
+              faults: faults,
+              warnings: warnings,
+              score: bad ? 50 + random.nextDouble() * 25 : 78 + random.nextDouble() * 22,
+            ));
+          }
+          final set = WorkoutSet.fromReps(
+              setIndex: si, startedAt: setStart, endedAt: time, reps: reps);
+          sets.add(set);
+          activeSec += set.durationSec;
+          setCount++;
+          time = time.add(Duration(seconds: 60 + random.nextInt(60))); // 휴식
+        }
+
+        await db.saveWorkout(WorkoutSession.fromSets(
+          userId: uid,
+          sets: sets,
+          caloriesKcal: caloriesKcal(weightKg: user.weightKg, activeSeconds: activeSec),
         ));
         sessionCount++;
-        // 다음 세트는 운동 시간 + 휴식 1~3분 뒤
-        time = time.add(Duration(seconds: duration + 60 + random.nextInt(120)));
+        time = time.add(Duration(hours: 3 + random.nextInt(5)));
       }
     }
   }
-  return (fakeUsers.length, sessionCount);
+  return (existing != null ? 0 : fakeUsers.length, sessionCount, setCount);
 }
 
-/// 저장한 값과 다시 읽은 값이 정확히 같은지 확인
-/// 실패한 항목이 있으면 그 내용을 담은 리스트를 돌려줌 (비어 있으면 통과)
+/// 저장한 값과 다시 읽은 값이 같은지 확인. 실패 항목 목록을 돌려줌 (비어 있으면 통과)
 Future<List<String>> verifyRoundTrip() async {
   final db = AppDatabase.instance;
   final errors = <String>[];
 
-  final original = User(
+  final user = User(
     name: '검증용사용자',
     age: 29,
     heightCm: 170.5,
     weightKg: 65.25,
     createdAt: DateTime(2026, 10, 16, 20, 0, 0),
   );
-  final userId = await db.insertUser(original);
-  final loaded = await db.getUser(userId);
+  final userId = await db.insertUser(user);
+  final loadedUser = await db.getUser(userId);
+  if (loadedUser == null) {
+    errors.add('User: 저장한 id($userId)로 조회가 안 됨');
+  } else if (loadedUser.name != user.name ||
+      loadedUser.weightKg != user.weightKg ||
+      loadedUser.createdAt != user.createdAt) {
+    errors.add('User 값 불일치');
+  }
+
+  final start = DateTime(2026, 10, 16, 20, 5, 0);
+  final reps = [
+    for (var i = 1; i <= 10; i++)
+      RepRecord(
+        repIndex: i,
+        endedAt: start.add(Duration(seconds: i * 4)),
+        isGood: i <= 8,
+        faults: i <= 8 ? const [] : const ['무릎 덜 굽힘'],
+        warnings: i == 3 ? const ['발뒤꿈치 들림'] : const [],
+        score: i <= 8 ? 90 : 60,
+      ),
+  ];
+  final set1 = WorkoutSet.fromReps(
+      setIndex: 1, startedAt: start, endedAt: start.add(const Duration(seconds: 40)), reps: reps);
+  final session = WorkoutSession.fromSets(userId: userId, sets: [set1], caloriesKcal: 12.5);
+  final sessionId = await db.saveWorkout(session);
+  final loaded = await db.getSessionDetail(sessionId);
 
   if (loaded == null) {
-    errors.add('User: 저장한 id($userId)로 조회가 안 됨');
+    errors.add('세션 조회 실패');
   } else {
-    if (loaded.name != original.name) errors.add('User.name 불일치');
-    if (loaded.age != original.age) errors.add('User.age 불일치');
-    if (loaded.heightCm != original.heightCm) errors.add('User.heightCm 불일치');
-    if (loaded.weightKg != original.weightKg) errors.add('User.weightKg 불일치');
-    if (loaded.createdAt != original.createdAt) {
-      errors.add('User.createdAt 불일치');
+    if (loaded.totalReps != 10 || loaded.goodReps != 8) errors.add('세션 횟수 불일치');
+    if (loaded.accuracy != 80) errors.add('세션 정확도 계산 오류');
+    if (loaded.caloriesKcal != 12.5) errors.add('칼로리 불일치');
+    if (loaded.memo != '무릎 덜 굽힘 2회') errors.add('피드백 요약 불일치: ${loaded.memo}');
+    if (loaded.sets.length != 1) {
+      errors.add('세트 개수 불일치');
+    } else {
+      final s = loaded.sets.first;
+      if (s.reps.length != 10) errors.add('반복 기록 개수 불일치');
+      if (s.faultCounts['무릎 덜 굽힘'] != 2) errors.add('세트 오류 집계 불일치');
+      if (s.reps[2].warnings.join() != '발뒤꿈치 들림') errors.add('참고 항목 저장 오류');
     }
   }
 
-  final session = WorkoutSession(
-    userId: userId,
-    exerciseType: 'squat',
-    startedAt: DateTime(2026, 10, 16, 20, 5, 0),
-    durationSec: 180,
-    totalReps: 15,
-    goodReps: 12,
-    averageScore: 87.5,
-    memo: '검증',
-  );
-  await db.insertSession(session);
-  final sessions = await db.getSessionsByUser(userId);
-
-  if (sessions.length != 1) {
-    errors.add('Session: 1개 저장했는데 ${sessions.length}개 조회됨');
-  } else {
-    final s = sessions.first;
-    if (s.totalReps != 15 || s.goodReps != 12) errors.add('Session 횟수 불일치');
-    if (s.averageScore != 87.5) errors.add('Session 점수 불일치');
-    if (s.memo != '검증') errors.add('Session 메모 불일치');
-    if (s.accuracy != 80) errors.add('Session 정확도 계산 오류');
-  }
-
-  // 사용자를 지우면 그 사용자의 운동 기록도 같이 지워지는지 (외래키 CASCADE)
+  // 사용자를 지우면 세션·세트·반복이 전부 같이 지워지는지 (CASCADE)
   await db.deleteUser(userId);
-  final afterDelete = await db.getSessionsByUser(userId);
-  if (afterDelete.isNotEmpty) {
-    errors.add('사용자 삭제 후에도 운동 기록이 남아 있음 (CASCADE 실패)');
+  if (await db.getSessionDetail(sessionId) != null) {
+    errors.add('사용자 삭제 후에도 운동 기록이 남아 있음');
   }
-
   return errors;
 }

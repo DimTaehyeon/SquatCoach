@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
-import '../pose_painter.dart';
+import 'pose_painter.dart';
 
 /// 카메라 실시간 스트림 → ML Kit Pose Detection → 화면 위에 뼈대 그리기
 class PoseCameraPage extends StatefulWidget {

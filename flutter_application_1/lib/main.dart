@@ -1,84 +1,69 @@
 import 'package:flutter/material.dart';
 
-import 'db_test_page.dart';
-import 'pages/ai_coach_page.dart';
+import 'pages/home_page.dart';
 import 'pages/my_page.dart';
-import 'pose_camera_page.dart';
+import 'pages/workout_start_page.dart';
+import 'ui/app_colors.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const PoseApp());
+  runApp(const SquatCoachApp());
 }
 
-class PoseApp extends StatelessWidget {
-  const PoseApp({super.key});
+class SquatCoachApp extends StatelessWidget {
+  const SquatCoachApp({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final base = ThemeData.dark(useMaterial3: true);
     return MaterialApp(
-      title: 'Squat Coach',
+      title: 'SquatCoach',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true),
-      home: const HomePage(),
+      theme: base.copyWith(
+        scaffoldBackgroundColor: AppColors.surface,
+        colorScheme: base.colorScheme.copyWith(
+          primary: AppColors.series,
+          surface: AppColors.surface,
+        ),
+        navigationBarTheme: const NavigationBarThemeData(
+          backgroundColor: AppColors.card,
+          indicatorColor: AppColors.seriesSoft,
+        ),
+      ),
+      home: const RootTabs(),
     );
   }
 }
 
-/// 개발 중 기능별 테스트 화면으로 들어가는 메뉴
-class HomePage extends StatelessWidget {
-  const HomePage({super.key});
+/// 하단 탭: 홈(기록) / 운동 / 마이페이지
+class RootTabs extends StatefulWidget {
+  const RootTabs({super.key});
+
+  @override
+  State<RootTabs> createState() => _RootTabsState();
+}
+
+class _RootTabsState extends State<RootTabs> {
+  int _index = 0;
+
+  static const _pages = [HomePage(), WorkoutStartPage(), MyPage()];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Squat Coach (개발용)')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.smart_toy_outlined),
-              title: const Text('AI 스쿼트 코치 (시연)'),
-              subtitle: const Text('실시간 자세 판정 · 횟수 세기 · 세트 저장'),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const AiCoachPage()),
-              ),
-            ),
-          ),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.person_outline),
-              title: const Text('마이페이지'),
-              subtitle: const Text('주간 통계 차트 · 날짜별 세트 기록'),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const MyPage()),
-              ),
-            ),
-          ),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.accessibility_new),
-              title: const Text('자세 인식 테스트'),
-              subtitle: const Text('카메라 + ML Kit 뼈대 표시'),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const PoseCameraPage()),
-              ),
-            ),
-          ),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.storage),
-              title: const Text('로컬 DB 테스트'),
-              subtitle: const Text('User / WorkoutSession 저장·조회'),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const DbTestPage()),
-              ),
-            ),
-          ),
+      body: IndexedStack(index: _index, children: _pages),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _index,
+        onDestinationSelected: (i) => setState(() => _index = i),
+        destinations: const [
+          NavigationDestination(
+              icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: '홈'),
+          NavigationDestination(
+              icon: Icon(Icons.fitness_center_outlined),
+              selectedIcon: Icon(Icons.fitness_center),
+              label: '운동'),
+          NavigationDestination(
+              icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: '마이페이지'),
         ],
       ),
     );

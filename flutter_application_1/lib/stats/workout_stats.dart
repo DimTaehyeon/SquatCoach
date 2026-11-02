@@ -1,6 +1,6 @@
 import '../models/workout_session.dart';
 
-/// 시간을 뗀 날짜 (같은 날의 기록을 묶을 때 사용)
+/// 시간을 뗀 날짜
 DateTime dayOf(DateTime d) => DateTime(d.year, d.month, d.day);
 
 /// 그 주의 월요일
@@ -9,43 +9,43 @@ DateTime weekStartOf(DateTime d) {
   return DateTime(day.year, day.month, day.day - (day.weekday - 1));
 }
 
-/// 하루치 운동 기록. 운동 세션 1개 = 세트 1개
-class DaySummary {
-  DaySummary(this.date, this.sets);
+/// 세션 여러 개를 합친 값 (하루, 한 주, 전체 누적에 공통으로 사용)
+class SessionTotals {
+  SessionTotals(this.sessions);
 
+  final List<WorkoutSession> sessions;
+
+  bool get isEmpty => sessions.isEmpty;
+  int get sessionCount => sessions.length;
+  int get setCount => sessions.fold<int>(0, (a, s) => a + s.setCount);
+  int get totalReps => sessions.fold<int>(0, (a, s) => a + s.totalReps);
+  int get goodReps => sessions.fold<int>(0, (a, s) => a + s.goodReps);
+  int get totalSec => sessions.fold<int>(0, (a, s) => a + s.durationSec);
+  double get caloriesKcal =>
+      sessions.fold<double>(0, (a, s) => a + s.caloriesKcal);
+
+  /// 정확도(%) = 정자세 횟수 합 ÷ 전체 횟수 합 × 100 (세션별 % 평균이 아님)
+  double get accuracy => totalReps == 0 ? 0 : goodReps / totalReps * 100;
+
+  /// 자세 점수: 반복 수로 가중 평균
+  double get averageScore {
+    if (totalReps == 0) return 0;
+    final sum =
+        sessions.fold<double>(0, (a, s) => a + s.averageScore * s.totalReps);
+    return sum / totalReps;
+  }
+
+  /// 운동한 날 수
+  int get activeDays => sessions.map((s) => dayOf(s.startedAt)).toSet().length;
+}
+
+/// 하루치
+class DaySummary extends SessionTotals {
+  DaySummary(this.date, super.sessions);
   final DateTime date;
-  final List<WorkoutSession> sets; // 시간순
-
-  bool get isEmpty => sets.isEmpty;
-  int get setCount => sets.length;
-  int get totalReps => sets.fold<int>(0, (a, s) => a + s.totalReps);
-  int get goodReps => sets.fold<int>(0, (a, s) => a + s.goodReps);
-  int get totalSec => sets.fold<int>(0, (a, s) => a + s.durationSec);
-  double get averageScore => sets.isEmpty
-      ? 0
-      : sets.fold<double>(0, (a, s) => a + s.averageScore) / sets.length;
-  double get accuracy => totalReps == 0 ? 0 : goodReps / totalReps * 100;
 }
 
-/// 일주일(월~일) 합계
-class WeekSummary {
-  WeekSummary(this.days);
-
-  final List<DaySummary> days; // 7개
-
-  Iterable<WorkoutSession> get _sets => days.expand((d) => d.sets);
-
-  int get activeDays => days.where((d) => !d.isEmpty).length;
-  int get setCount => _sets.length;
-  int get totalReps => _sets.fold<int>(0, (a, s) => a + s.totalReps);
-  int get goodReps => _sets.fold<int>(0, (a, s) => a + s.goodReps);
-  double get averageScore => setCount == 0
-      ? 0
-      : _sets.fold<double>(0, (a, s) => a + s.averageScore) / setCount;
-  double get accuracy => totalReps == 0 ? 0 : goodReps / totalReps * 100;
-}
-
-/// 운동 기록을 날짜별로 묶음
+/// 세션을 날짜별로 묶음 (하루 안에서는 시간순)
 Map<DateTime, DaySummary> groupByDay(List<WorkoutSession> sessions) {
   final map = <DateTime, List<WorkoutSession>>{};
   for (final s in sessions) {
@@ -68,6 +68,10 @@ List<DaySummary> weekDays(Map<DateTime, DaySummary> byDay, DateTime weekStart) {
   });
 }
 
+/// 7일치를 합친 주간 합계
+SessionTotals weekTotals(List<DaySummary> days) =>
+    SessionTotals(days.expand((d) => d.sessions).toList());
+
 // ---------------- 표시용 글자 ----------------
 
 const _weekdays = ['월', '화', '수', '목', '금', '토', '일'];
@@ -80,11 +84,16 @@ String formatTime(DateTime d) =>
     '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
 
 String formatDuration(int sec) {
-  final m = sec ~/ 60;
+  final h = sec ~/ 3600;
+  final m = (sec % 3600) ~/ 60;
   final s = sec % 60;
+  if (h > 0) return m == 0 ? '$h시간' : '$h시간 $m분';
   if (m == 0) return '$s초';
   return s == 0 ? '$m분' : '$m분 $s초';
 }
+
+String formatKcal(double kcal) =>
+    kcal < 10 ? kcal.toStringAsFixed(1) : kcal.round().toString();
 
 String formatWeekRange(DateTime weekStart) {
   final end = DateTime(weekStart.year, weekStart.month, weekStart.day + 6);
