@@ -79,6 +79,25 @@ const _required = [
   PoseLandmarkType.rightAnkle,
 ];
 
+/// 사물을 사람으로 잘못 잡은 경우를 걸러냄
+/// - 어깨 → 골반 → 무릎 → 발목이 위에서 아래 순서로 놓여 있어야 함
+/// - 어깨~발목 높이가 화면 높이의 [minBodyRatio] 이상이어야 함 (멀리 있는 작은 물체 제외)
+bool looksLikePerson(Pose pose, Size upright, {double minBodyRatio = 0.3}) {
+  double? y(PoseLandmarkType t) => pose.landmarks[t]?.y;
+  for (final t in _required) {
+    if (y(t) == null) return false;
+  }
+  double mid(PoseLandmarkType a, PoseLandmarkType b) => (y(a)! + y(b)!) / 2;
+  final shoulder = mid(PoseLandmarkType.leftShoulder, PoseLandmarkType.rightShoulder);
+  final hip = mid(PoseLandmarkType.leftHip, PoseLandmarkType.rightHip);
+  final knee = mid(PoseLandmarkType.leftKnee, PoseLandmarkType.rightKnee);
+  final ankle = mid(PoseLandmarkType.leftAnkle, PoseLandmarkType.rightAnkle);
+
+  // 화면 좌표는 아래로 갈수록 y가 커짐 (앉으면 골반과 무릎 높이가 비슷해지므로 골반-무릎은 비교 안 함)
+  if (!(shoulder < hip && hip < ankle && knee < ankle)) return false;
+  return (ankle - shoulder) >= upright.height * minBodyRatio;
+}
+
 /// 전신(어깨~발목)이 충분히 보이지 않으면 null
 SquatFrame? extractSquatFrame(Pose pose, Size upright,
     {double minLikelihood = 0.5}) {

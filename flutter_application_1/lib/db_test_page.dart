@@ -51,10 +51,10 @@ class _DbTestPageState extends State<DbTestPage> {
   }
 
   Future<String> _insertFake() async {
-    final (u, s) = await insertFakeData();
-    final (totalU, totalS) = await _db.counts();
-    return '✅ 사용자 $u명, 운동 기록 $s개 추가\n'
-        '현재 DB: 사용자 $totalU명 / 운동 기록 $totalS개';
+    final (u, s, st) = await insertFakeData();
+    final (totalU, totalS, totalSets, totalReps) = await _db.counts();
+    return '✅ 사용자 $u명, 운동 $s회(세트 $st개) 추가\n'
+        '현재 DB: 사용자 $totalU명 / 운동 $totalS회 / 세트 $totalSets개 / 반복 $totalReps회';
   }
 
   Future<String> _verify() async {
@@ -118,18 +118,18 @@ class _DbTestPageState extends State<DbTestPage> {
                           title: Text('${u.name} (id: ${u.id})'),
                           subtitle: Text(
                               '${u.age}세 · ${u.heightCm}cm · ${u.weightKg}kg · '
-                              '기록 ${_sessions[u.id]?.length ?? 0}개'),
+                              '운동 ${_sessions[u.id]?.length ?? 0}회'),
                           children: [
                             for (final s in _sessions[u.id] ?? <WorkoutSession>[])
                               ListTile(
                                 dense: true,
                                 title: Text(
-                                    '${s.exerciseType} · ${s.totalReps}회 중 '
+                                    '${s.setCount}세트 · ${s.totalReps}회 중 '
                                     '${s.goodReps}회 정확 '
                                     '(${s.accuracy.toStringAsFixed(0)}%)'),
                                 subtitle: Text(
                                     '${_formatDate(s.startedAt)} · '
-                                    '${s.durationSec}초 · '
+                                    '${s.durationSec}초 · ${s.caloriesKcal.toStringAsFixed(1)}kcal · '
                                     '점수 ${s.averageScore.toStringAsFixed(1)}'
                                     '${s.memo != null ? ' · ${s.memo}' : ''}'),
                               ),

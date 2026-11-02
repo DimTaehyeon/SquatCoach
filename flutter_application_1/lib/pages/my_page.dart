@@ -1,16 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../db/app_database.dart';
 import '../db/fake_data.dart';
+import '../db_test_page.dart';
 import '../models/user.dart';
 import '../models/workout_session.dart';
+import '../pose_camera_page.dart';
+import '../services/notification_service.dart';
+import '../state/app_events.dart';
 import '../stats/workout_stats.dart';
 import '../ui/app_colors.dart';
 import '../widgets/common.dart';
-import '../widgets/weekly_bar_chart.dart';
-import 'day_detail_page.dart';
+import '../widgets/time_input_dialog.dart';
 
-/// 마이페이지: 프로필 + 주간 요약 + 주간 차트 + 최근 기록
+/// 마이페이지: 프로필, 누적 운동 통계, 알림 설정, 개발자 도구
 class MyPage extends StatefulWidget {
   const MyPage({super.key});
 
@@ -19,72 +23,163 @@ class MyPage extends StatefulWidget {
 }
 
 class _MyPageState extends State<MyPage> {
-  final _db = AppDatabase.instance;
+  static const _kReminderOn = 'reminder_enabled';
+  static const _kReminderTime = 'reminder_time'; // "HH:mm"
 
+  final _db = AppDatabase.instance;
   bool _loading = true;
-  List<User> _users = [];
   User? _user;
-  Map<DateTime, DaySummary> _byDay = {};
-  DateTime _weekStart = weekStartOf(DateTime.now());
-  ChartMetric _metric = ChartMetric.reps;
+  SessionTotals _all = SessionTotals(const []);
+  int _streak = 0;
+  WorkoutSession? _best;
+
+  bool _reminderOn = false;
+  bool _showDev = false; // 프로필을 길게 누르면 개발자 도구 표시
+  TimeOfDay _reminderTime = const TimeOfDay(hour: 20, minute: 0);
 
   @override
   void initState() {
     super.initState();
+    dataChanged.addListener(_load);
     _load();
   }
 
-  /// DB에서 사용자와 운동 기록을 다시 읽어옴
-  Future<void> _load({int? userId}) async {
-    final users = await _db.getAllUsers();
-    User? user;
-    if (users.isNotEmpty) {
-      final wantId = userId ?? _user?.id;
-      user = users.firstWhere((u) => u.id == wantId,
-          orElse: () => users.first);
-    }
-    final sessions = user == null
-        ? <WorkoutSession>[]
-        : await _db.getSessionsByUser(user.id!);
+  @override
+  void dispose() {
+    dataChanged.removeListener(_load);
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final user = await _db.getOrCreateDefaultUser();
+    final sessions = await _db.getSessionsByUser(user.id!);
+    final on = await _db.getSetting(_kReminderOn);
+    final time = await _db.getSetting(_kReminderTime);
     if (!mounted) return;
+
+    WorkoutSession? best;
+    for (final s in sessions) {
+      if (s.totalReps >= 5 && (best == null || s.accuracy > best.accuracy)) best = s;
+    }
+
     setState(() {
-      _users = users;
       _user = user;
-      _byDay = groupByDay(sessions);
+      _all = SessionTotals(sessions);
+      _streak = _currentStreak(sessions);
+      _best = best;
+      _reminderOn = on == '1';
+      if (time != null && time.contains(':')) {
+        final p = time.split(':');
+        _reminderTime = TimeOfDay(hour: int.parse(p[0]), minute: int.parse(p[1]));
+      }
       _loading = false;
     });
   }
 
-  Future<void> _insertDemo() async {
-    setState(() => _loading = true);
-    await insertFakeData();
-    await _load();
+  /// 오늘(또는 어제)까지 연속으로 운동한 날 수
+  int _currentStreak(List<WorkoutSession> sessions) {
+    final days = sessions.map((s) => dayOf(s.startedAt)).toSet();
+    var d = dayOf(DateTime.now());
+    if (!days.contains(d)) d = DateTime(d.year, d.month, d.day - 1);
+    var n = 0;
+    while (days.contains(d)) {
+      n++;
+      d = DateTime(d.year, d.month, d.day - 1);
+    }
+    return n;
   }
 
-  bool get _isCurrentWeek => _weekStart == weekStartOf(DateTime.now());
+  // ---------------- 알림 ----------------
 
-  void _moveWeek(int delta) => setState(() {
-        _weekStart = DateTime(
-            _weekStart.year, _weekStart.month, _weekStart.day + 7 * delta);
-      });
-
-  void _openDay(DaySummary day) {
-    if (day.isEmpty) {
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(SnackBar(
-          content: Text('${formatDateKo(day.date)}에는 운동 기록이 없어요'),
-          duration: const Duration(seconds: 2),
+  Future<void> _toggleReminder(bool on) async {
+    final service = NotificationService.instance;
+    if (on) {
+      final granted = await service.requestPermission();
+      if (!granted) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('알림 권한이 없어요. 설정 앱 → SquatCoach → 알림에서 허용해 주세요.'),
         ));
-      return;
+        return;
+      }
+      await service.scheduleDaily(_reminderTime.hour, _reminderTime.minute);
+    } else {
+      await service.cancelDaily();
     }
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => DayDetailPage(day: day, userName: _user!.name),
+    await _db.setSetting(_kReminderOn, on ? '1' : '0');
+    if (mounted) setState(() => _reminderOn = on);
+  }
+
+  Future<void> _pickTime() async {
+    final picked = await showTimeInputDialog(context, _reminderTime); // 키보드 입력 + 휠
+    if (picked == null) return;
+    await _db.setSetting(_kReminderTime,
+        '${picked.hour.toString().padLeft(2, '0')}:${picked.minute.toString().padLeft(2, '0')}');
+    if (_reminderOn) {
+      await NotificationService.instance.scheduleDaily(picked.hour, picked.minute);
+    }
+    if (mounted) setState(() => _reminderTime = picked);
+  }
+
+  String _formatTime(TimeOfDay t) {
+    final ampm = t.hour < 12 ? '오전' : '오후';
+    final h = t.hour % 12 == 0 ? 12 : t.hour % 12;
+    return '$ampm $h:${t.minute.toString().padLeft(2, '0')}';
+  }
+
+  // ---------------- 프로필 ----------------
+
+  Future<void> _editProfile() async {
+    final user = _user;
+    if (user == null) return;
+    final name = TextEditingController(text: user.name);
+    final age = TextEditingController(text: '${user.age}');
+    final height = TextEditingController(text: user.heightCm.toStringAsFixed(1));
+    final weight = TextEditingController(text: user.weightKg.toStringAsFixed(1));
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('프로필 수정'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: name, decoration: const InputDecoration(labelText: '이름')),
+              TextField(
+                  controller: age,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: '나이')),
+              TextField(
+                  controller: height,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: '키 (cm)')),
+              TextField(
+                  controller: weight,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                      labelText: '몸무게 (kg)', helperText: '소모 칼로리 계산에 사용돼요')),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('저장')),
+        ],
       ),
     );
+    if (saved != true) return;
+    await _db.updateUser(User(
+      id: user.id,
+      name: name.text.trim().isEmpty ? user.name : name.text.trim(),
+      age: int.tryParse(age.text) ?? user.age,
+      heightCm: double.tryParse(height.text) ?? user.heightCm,
+      weightKg: double.tryParse(weight.text) ?? user.weightKg,
+      createdAt: user.createdAt,
+    ));
   }
+
+  // ---------------- 화면 ----------------
 
   @override
   Widget build(BuildContext context) {
@@ -93,47 +188,33 @@ class _MyPageState extends State<MyPage> {
       appBar: AppBar(
         backgroundColor: AppColors.surface,
         surfaceTintColor: Colors.transparent,
-        title: const Text('마이페이지',
-            style: TextStyle(fontWeight: FontWeight.w700)),
-        actions: [
-          if (_users.length > 1)
-            PopupMenuButton<int>(
-              tooltip: '사용자 바꾸기',
-              icon: const Icon(Icons.switch_account_outlined),
-              onSelected: (id) => _load(userId: id),
-              itemBuilder: (_) => [
-                for (final u in _users)
-                  CheckedPopupMenuItem(
-                    value: u.id!,
-                    checked: u.id == _user?.id,
-                    child: Text(u.name),
-                  ),
-              ],
-            ),
-        ],
+        title: const Text('마이페이지', style: TextStyle(fontWeight: FontWeight.w700)),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _user == null
-              ? _EmptyState(onInsert: _insertDemo)
-              : RefreshIndicator(onRefresh: _load, child: _buildContent()),
+      body: _loading ? const Center(child: CircularProgressIndicator()) : _content(),
     );
   }
 
-  Widget _buildContent() {
+  Widget _content() {
     final user = _user!;
-    final week = weekDays(_byDay, _weekStart);
-    final ws = WeekSummary(week);
-    final recent = _byDay.values.toList()
-      ..sort((a, b) => b.date.compareTo(a.date));
-
+    final all = _all;
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 40),
       children: [
-        _ProfileCard(user: user, totalDays: _byDay.length),
+        GestureDetector(
+          // 숨겨진 개발자 도구: 프로필 길게 누르기
+          onLongPress: () {
+            HapticFeedback.mediumImpact();
+            setState(() => _showDev = !_showDev);
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(_showDev ? '개발자 도구를 열었어요 (맨 아래)' : '개발자 도구를 숨겼어요'),
+              duration: const Duration(seconds: 2),
+            ));
+          },
+          child: _ProfileCard(user: user, onEdit: _editProfile),
+        ),
 
-        // ---------- 주간 요약 ----------
-        SectionTitle(_isCurrentWeek ? '이번 주 요약' : '${formatWeekRange(_weekStart)} 요약'),
+        // ---------- 누적 운동 통계 ----------
+        const SectionTitle('누적 운동 통계'),
         GridView.count(
           crossAxisCount: 2,
           shrinkWrap: true,
@@ -142,117 +223,122 @@ class _MyPageState extends State<MyPage> {
           crossAxisSpacing: 10,
           childAspectRatio: 1.75,
           children: [
+            StatTile(label: '총 스쿼트', value: '${all.totalReps}', unit: '회', icon: Icons.fitness_center),
             StatTile(
-              label: '총 횟수',
-              value: '${ws.totalReps}',
-              unit: '회',
-              icon: Icons.fitness_center,
-            ),
+                label: '평균 정확도',
+                value: all.totalReps == 0 ? '-' : all.accuracy.toStringAsFixed(0),
+                unit: all.totalReps == 0 ? '' : '%',
+                icon: Icons.track_changes),
+            StatTile(label: '총 운동 시간', value: formatDuration(all.totalSec), icon: Icons.timer_outlined),
             StatTile(
-              label: '운동한 날',
-              value: '${ws.activeDays}',
-              unit: '/ 7일',
-              icon: Icons.calendar_today_outlined,
-            ),
+                label: '총 소모 칼로리',
+                value: formatKcal(all.caloriesKcal),
+                unit: 'kcal',
+                icon: Icons.local_fire_department_outlined),
             StatTile(
-              label: '평균 자세 점수',
-              value: ws.setCount == 0 ? '-' : ws.averageScore.toStringAsFixed(1),
-              unit: ws.setCount == 0 ? '' : '점',
-              icon: Icons.insights,
-            ),
-            StatTile(
-              label: '정확도',
-              value: ws.totalReps == 0 ? '-' : ws.accuracy.toStringAsFixed(0),
-              unit: ws.totalReps == 0 ? '' : '%',
-              icon: Icons.track_changes,
-            ),
+                label: '운동 횟수',
+                value: '${all.sessionCount}',
+                unit: '번 · ${all.activeDays}일',
+                icon: Icons.calendar_month_outlined),
+            StatTile(label: '연속 운동', value: '$_streak', unit: '일째', icon: Icons.whatshot_outlined),
           ],
         ),
-
-        // ---------- 주간 차트 ----------
-        const SectionTitle('주간 통계'),
-        AppCard(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  IconButton(
-                    tooltip: '이전 주',
-                    onPressed: () => _moveWeek(-1),
-                    icon: const Icon(Icons.chevron_left),
+        if (_best != null) ...[
+          const SizedBox(height: 10),
+          AppCard(
+            child: Row(
+              children: [
+                const Icon(Icons.emoji_events_outlined, color: AppColors.textSecondary),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    '최고 기록: ${formatDateKo(_best!.startedAt)} · '
+                    '정확도 ${_best!.accuracy.toStringAsFixed(0)}% (${_best!.totalReps}회)',
+                    style: const TextStyle(fontSize: 13.5, color: AppColors.textPrimary),
                   ),
-                  Expanded(
-                    child: Text(
-                      formatWeekRange(_weekStart),
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: '다음 주',
-                    onPressed: _isCurrentWeek ? null : () => _moveWeek(1),
-                    icon: const Icon(Icons.chevron_right),
-                  ),
-                ],
-              ),
-              Center(
-                child: SegmentedButton<ChartMetric>(
-                  showSelectedIcon: false,
-                  style: const ButtonStyle(visualDensity: VisualDensity.compact),
-                  segments: const [
-                    ButtonSegment(value: ChartMetric.reps, label: Text('스쿼트 횟수')),
-                    ButtonSegment(value: ChartMetric.score, label: Text('평균 점수')),
-                  ],
-                  selected: {_metric},
-                  onSelectionChanged: (s) => setState(() => _metric = s.first),
                 ),
+              ],
+            ),
+          ),
+        ],
+
+        // ---------- 알림 설정 ----------
+        const SectionTitle('알림 설정'),
+        AppCard(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Column(
+            children: [
+              SwitchListTile(
+                value: _reminderOn,
+                onChanged: _toggleReminder,
+                title: const Text('매일 운동 알림'),
+                subtitle: const Text('정해진 시간에 스쿼트할 시간을 알려 드려요'),
               ),
-              const SizedBox(height: 14),
-              WeeklyBarChart(days: week, metric: _metric, onTapDay: _openDay),
-              const SizedBox(height: 6),
-              const Text(
-                '막대를 누르면 그날의 세트별 기록을 볼 수 있어요',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+              ListTile(
+                enabled: _reminderOn,
+                title: const Text('알림 시간'),
+                trailing: Text(
+                  _formatTime(_reminderTime),
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                onTap: _reminderOn ? _pickTime : null,
               ),
             ],
           ),
         ),
 
-        // ---------- 최근 기록 ----------
-        const SectionTitle('최근 기록'),
-        if (recent.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(24),
-            child: Text('아직 운동 기록이 없어요',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: AppColors.textMuted)),
-          )
-        else
-          for (final day in recent.take(14)) ...[
-            _DayTile(day: day, onTap: () => _openDay(day)),
-            const SizedBox(height: 8),
-          ],
+        // ---------- 개발자 도구 (숨김) ----------
+        if (_showDev) ...[
+        const SectionTitle('개발자 도구'),
+        AppCard(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.accessibility_new),
+                title: const Text('자세 인식 테스트'),
+                subtitle: const Text('뼈대·FPS만 확인'),
+                onTap: () => Navigator.push(
+                    context, MaterialPageRoute(builder: (_) => const PoseCameraPage())),
+              ),
+              ListTile(
+                leading: const Icon(Icons.storage),
+                title: const Text('로컬 DB 테스트'),
+                subtitle: const Text('저장·조회 검증, 전부 삭제'),
+                onTap: () => Navigator.push(
+                    context, MaterialPageRoute(builder: (_) => const DbTestPage())),
+              ),
+              ListTile(
+                leading: const Icon(Icons.auto_awesome_outlined),
+                title: const Text('가짜 운동 기록 넣기'),
+                subtitle: const Text('최근 3주치 테스트 데이터'),
+                onTap: () async {
+                  final messenger = ScaffoldMessenger.of(context);
+                  final (_, sessions, sets) = await insertFakeData(userId: _user!.id);
+                  notifyDataChanged();
+                  messenger.showSnackBar(
+                      SnackBar(content: Text('운동 $sessions회(세트 $sets개)를 넣었어요')));
+                },
+              ),
+            ],
+          ),
+        ),
+        ],
       ],
     );
   }
 }
 
 class _ProfileCard extends StatelessWidget {
-  const _ProfileCard({required this.user, required this.totalDays});
+  const _ProfileCard({required this.user, required this.onEdit});
 
   final User user;
-  final int totalDays;
+  final VoidCallback onEdit;
 
   @override
   Widget build(BuildContext context) {
     return AppCard(
+      onTap: onEdit,
       padding: const EdgeInsets.all(18),
       child: Row(
         children: [
@@ -273,158 +359,22 @@ class _ProfileCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  user.name,
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w800,
-                    color: AppColors.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    _Chip('${user.age}세'),
-                    _Chip('${user.heightCm.toStringAsFixed(1)}cm'),
-                    _Chip('${user.weightKg.toStringAsFixed(1)}kg'),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          Column(
-            children: [
-              Text(
-                '$totalDays',
-                style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-              const Text('누적 운동일',
-                  style: TextStyle(fontSize: 11, color: AppColors.textMuted)),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Chip extends StatelessWidget {
-  const _Chip(this.text);
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Text(text,
-          style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-    );
-  }
-}
-
-class _DayTile extends StatelessWidget {
-  const _DayTile({required this.day, required this.onTap});
-
-  final DaySummary day;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return AppCard(
-      onTap: onTap,
-      padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
-      child: Row(
-        children: [
-          // 날짜 블록
-          Container(
-            width: 48,
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Column(
-              children: [
-                Text('${day.date.day}',
+                Text(user.name,
                     style: const TextStyle(
-                      fontSize: 18,
+                      fontSize: 20,
                       fontWeight: FontWeight.w800,
                       color: AppColors.textPrimary,
                     )),
-                Text('${day.date.month}월 ${weekdayKo(day.date)}',
-                    style: const TextStyle(
-                        fontSize: 10.5, color: AppColors.textMuted)),
-              ],
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+                const SizedBox(height: 6),
                 Text(
-                  '${day.setCount}세트 · ${day.totalReps}회',
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  '정확도 ${day.accuracy.toStringAsFixed(0)}% · ${formatDuration(day.totalSec)}',
-                  style: const TextStyle(
-                      fontSize: 12.5, color: AppColors.textSecondary),
+                  '${user.age}세 · ${user.heightCm.toStringAsFixed(1)}cm · ${user.weightKg.toStringAsFixed(1)}kg',
+                  style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
                 ),
               ],
             ),
           ),
-          GradeBadge(score: day.averageScore),
-          const Icon(Icons.chevron_right, color: AppColors.textMuted),
+          const Icon(Icons.edit_outlined, color: AppColors.textMuted),
         ],
-      ),
-    );
-  }
-}
-
-class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.onInsert});
-  final VoidCallback onInsert;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.bar_chart_rounded,
-                size: 56, color: AppColors.textMuted),
-            const SizedBox(height: 12),
-            const Text('저장된 사용자와 운동 기록이 없어요',
-                style: TextStyle(fontSize: 16, color: AppColors.textPrimary)),
-            const SizedBox(height: 6),
-            const Text('테스트용 데이터를 넣고 화면을 확인해 보세요',
-                style: TextStyle(fontSize: 13, color: AppColors.textMuted)),
-            const SizedBox(height: 20),
-            FilledButton.icon(
-              onPressed: onInsert,
-              icon: const Icon(Icons.add),
-              label: const Text('가짜 데이터 넣기'),
-            ),
-          ],
-        ),
       ),
     );
   }

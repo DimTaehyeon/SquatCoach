@@ -5,7 +5,15 @@ import 'package:flutter/material.dart';
 import '../stats/workout_stats.dart';
 import '../ui/app_colors.dart';
 
-enum ChartMetric { reps, score }
+enum ChartMetric {
+  reps('횟수', '회'),
+  accuracy('정확도', '%'),
+  calories('칼로리', 'kcal');
+
+  const ChartMetric(this.label, this.unit);
+  final String label;
+  final String unit;
+}
 
 /// 월~일 7개 막대. 막대(또는 그 열 어디든)를 누르면 onTapDay 호출
 class WeeklyBarChart extends StatelessWidget {
@@ -26,12 +34,15 @@ class WeeklyBarChart extends StatelessWidget {
   static const _dayLabelH = 34.0;
   static const _axisW = 30.0;
 
-  double _value(DaySummary d) =>
-      metric == ChartMetric.reps ? d.totalReps.toDouble() : d.averageScore;
+  double _value(DaySummary d) => switch (metric) {
+        ChartMetric.reps => d.totalReps.toDouble(),
+        ChartMetric.accuracy => d.accuracy,
+        ChartMetric.calories => d.caloriesKcal,
+      };
 
-  /// 축 최댓값을 보기 좋은 숫자로 올림 (횟수: 10/20/50 단위, 점수: 100 고정)
+  /// 축 최댓값을 보기 좋은 숫자로 올림 (횟수·칼로리: 10/20/50 단위, 정확도: 100 고정)
   double get _maxY {
-    if (metric == ChartMetric.score) return 100;
+    if (metric == ChartMetric.accuracy) return 100;
     final m = days.map(_value).fold<double>(0, math.max);
     if (m <= 0) return 10;
     final step = m <= 50 ? 10 : (m <= 100 ? 20 : 50);
@@ -86,7 +97,7 @@ class WeeklyBarChart extends StatelessWidget {
                       valueLabelH: _valueLabelH,
                       dayLabelH: _dayLabelH,
                       isToday: d.date == today,
-                      unit: metric == ChartMetric.reps ? '회' : '점',
+                      unit: metric.unit,
                       onTap: () => onTapDay(d),
                     ),
                   ),
