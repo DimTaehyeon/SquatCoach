@@ -63,6 +63,10 @@ class _AiCoachPageState extends State<AiCoachPage> with WidgetsBindingObserver {
   /// 피드백 지연(추정) = 분석 시간 + 평균 내는 동안 밀리는 시간(평균 프레임의 절반)
   double get _feedbackDelayMs =>
       _fps <= 0 ? 0 : _procMs + (_smoothFrames / 2) * (1000 / _fps);
+  // 사물 오인식 방지: 사람처럼 보이는 프레임이 이만큼 연속돼야 판정 시작 (30fps 기준 약 0.17초)
+  static const _personFramesNeeded = 5;
+  int _personFrames = 0;
+
   RepResult? _lastRep;
   bool _showProbs = false;
   bool _saving = false;
@@ -170,9 +174,14 @@ class _AiCoachPageState extends State<AiCoachPage> with WidgetsBindingObserver {
       double? knee;
       RepResult? finished;
 
-      if (poses.isNotEmpty) {
-        final frame = extractSquatFrame(
-            poses.first, uprightImageSize(meta.size, meta.rotation));
+      final upright = uprightImageSize(meta.size, meta.rotation);
+      final isPerson =
+          poses.isNotEmpty && looksLikePerson(poses.first, upright);
+      _personFrames = isPerson ? _personFrames + 1 : 0;
+      final personReady = _personFrames >= _personFramesNeeded;
+
+      if (personReady) {
+        final frame = extractSquatFrame(poses.first, upright);
         if (frame == null) {
           phase = _Phase.notFullBody;
         } else {
@@ -213,7 +222,7 @@ class _AiCoachPageState extends State<AiCoachPage> with WidgetsBindingObserver {
       }
 
       setState(() {
-        _poses = poses;
+        _poses = personReady ? poses : []; // 사물에는 뼈대를 그리지 않음
         _imageSize = meta.size;
         _rotation = meta.rotation;
         _phase = phase;
