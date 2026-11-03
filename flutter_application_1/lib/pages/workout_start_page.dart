@@ -1,13 +1,45 @@
 import 'package:flutter/material.dart';
 
-import '../config/squat_criteria.dart' show SquatFault, CheckRole;
+import '../config/squat_criteria.dart' show SquatFault, CheckRole, JudgeMode, kJudgeModeKey;
+import '../db/app_database.dart';
+import '../state/app_events.dart';
 import '../ui/app_colors.dart';
 import '../widgets/common.dart';
 import 'ai_coach_page.dart';
 
-/// 운동 탭: 촬영 안내 + 판정 항목 + 시작 버튼
-class WorkoutStartPage extends StatelessWidget {
+/// 운동 탭: 촬영 안내 + 판정 모드 + 판정 항목 + 시작 버튼
+class WorkoutStartPage extends StatefulWidget {
   const WorkoutStartPage({super.key});
+
+  @override
+  State<WorkoutStartPage> createState() => _WorkoutStartPageState();
+}
+
+class _WorkoutStartPageState extends State<WorkoutStartPage> {
+  JudgeMode _mode = JudgeMode.beginner;
+
+  @override
+  void initState() {
+    super.initState();
+    dataChanged.addListener(_loadMode); // 데이터 초기화하면 모드도 기본값으로
+    _loadMode();
+  }
+
+  @override
+  void dispose() {
+    dataChanged.removeListener(_loadMode);
+    super.dispose();
+  }
+
+  Future<void> _loadMode() async {
+    final v = await AppDatabase.instance.getSetting(kJudgeModeKey);
+    if (mounted) setState(() => _mode = JudgeMode.fromName(v));
+  }
+
+  Future<void> _setMode(JudgeMode m) async {
+    setState(() => _mode = m);
+    await AppDatabase.instance.setSetting(kJudgeModeKey, m.name);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -39,6 +71,26 @@ class WorkoutStartPage extends StatelessWidget {
                 _Step(n: 2, text: '2~3m 떨어져서 카메라 정면에 서세요'),
                 _Step(n: 3, text: '머리부터 발끝까지 화면에 들어오는지 확인하세요'),
                 _Step(n: 4, text: '세트마다 처음 2초는 똑바로 서서 영점을 잡아요'),
+              ],
+            ),
+          ),
+          const SectionTitle('판정 모드'),
+          AppCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SegmentedButton<JudgeMode>(
+                  segments: [
+                    for (final m in JudgeMode.values)
+                      ButtonSegment(value: m, label: Text(m.label)),
+                  ],
+                  selected: {_mode},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (s) => _setMode(s.first),
+                ),
+                const SizedBox(height: 8),
+                Text(_mode.description,
+                    style: const TextStyle(fontSize: 12.5, color: AppColors.textSecondary)),
               ],
             ),
           ),

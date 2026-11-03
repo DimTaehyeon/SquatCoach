@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:ui' show Size;
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
@@ -53,4 +54,33 @@ InputImage? cameraImageToInputImage(
       bytesPerRow: plane.bytesPerRow,
     ),
   );
+}
+
+
+/// 앞/뒤 방향마다 "기본 카메라" 1개씩만 남김 (광각·망원 렌즈가 잡히지 않게)
+///
+/// - iPhone: OS가 렌즈 종류(lensType)를 알려 줌 → 기본 렌즈(wide)를 고름
+/// - Android: 렌즈 종류를 알려 주지 않음 → 카메라 ID 숫자가 가장 작은 것을 고름
+///   (Android는 기본 카메라에 가장 작은 번호를 줌: 보통 뒤 0번, 앞 1번.
+///    광각·망원은 2번 이후 번호로 붙음)
+/// 결과 순서: [앞 카메라, 뒤 카메라] (없는 방향은 빠짐)
+List<CameraDescription> pickMainCameras(List<CameraDescription> all) {
+  CameraDescription? pick(CameraLensDirection dir) {
+    final same = all.where((c) => c.lensDirection == dir).toList();
+    if (same.isEmpty) return null;
+    final wide = same.where((c) => c.lensType == CameraLensType.wide);
+    if (wide.isNotEmpty) return wide.first;
+    same.sort((a, b) =>
+        (int.tryParse(a.name) ?? 1 << 30).compareTo(int.tryParse(b.name) ?? 1 << 30));
+    return same.first;
+  }
+
+  // 폰마다 카메라 구성이 달라서 확인용으로 터미널에 남김
+  for (final c in all) {
+    debugPrint('[카메라] ${c.name} · ${c.lensDirection.name} · ${c.lensType.name}');
+  }
+  return [CameraLensDirection.front, CameraLensDirection.back]
+      .map(pick)
+      .whereType<CameraDescription>()
+      .toList();
 }

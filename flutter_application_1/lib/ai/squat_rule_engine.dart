@@ -3,7 +3,8 @@ import 'dart:math' as math;
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
 import '../config/squat_criteria.dart' as c;
-import '../config/squat_criteria.dart' show Level, SquatFault, CheckRole, Threshold;
+import '../config/squat_criteria.dart'
+    show Level, SquatFault, CheckRole, Threshold, JudgeCriteria;
 
 /// 판정 기준 문서(v0.2)를 그대로 옮긴 규칙 판정
 ///
@@ -68,6 +69,13 @@ class BodyPoints {
   double get kneeWidth => (lk.x - rk.x).abs();
   double get shoulderWidth => (ls.x - rs.x).abs();
 
+  /// 어깨선 기울기(°, 방향 포함). 폰이 비뚤게 서 있어도 서 있을 때 값을 빼면 상쇄됨
+  double get shoulderTiltSigned =>
+      math.atan2(ls.y - rs.y, shoulderWidth.clamp(1e-6, double.infinity)) * 180 / math.pi;
+
+  /// 골반 좌우 높이 차(방향 포함, 픽셀)
+  double get pelvisTiltSigned => lh.y - rh.y;
+
   /// 뒤꿈치 높이 (안 보이면 null)
   double? get heelY {
     final l = _pts[PoseLandmarkType.leftHeel];
@@ -91,10 +99,14 @@ class StandingBaseline {
     required this.hipMidX,
     required this.hipMidY,
     required this.heelY,
+    this.shoulderTilt = 0,
+    this.pelvisTilt = 0,
   });
 
   final double thigh, shin, torso, ankleWidth, shoulderWidth;
   final double hipMidX, hipMidY;
+  final double shoulderTilt; // 서 있을 때 어깨선 기울기(°, 폰 기울기 포함)
+  final double pelvisTilt; // 서 있을 때 골반 좌우 높이 차(픽셀)
   final double? heelY;
 
   /// 다리 벌어짐(보폭) — 준비 자세에서 한 번 확인 (참고)
@@ -169,6 +181,8 @@ class BaselineCalibrator {
       shoulderWidth: avg((f) => f.shoulderWidth),
       hipMidX: avg((f) => f.hipMid.x),
       hipMidY: avg((f) => f.hipMid.y),
+      shoulderTilt: avg((f) => f.shoulderTiltSigned),
+      pelvisTilt: avg((f) => f.pelvisTiltSigned),
       heelY: heels.length >= _frames.length / 2
           ? heels.reduce((a, b) => a + b) / heels.length
           : null,
@@ -184,11 +198,9 @@ class FrameMetrics {
   FrameMetrics(StandingBaseline b, BodyPoints p, this.time)
       : hipDrop = (p.hipMid.y - b.hipMidY) / b.thigh,
         kneeRatio = p.ankleWidth > 0 ? p.kneeWidth / p.ankleWidth : 1.0,
-        shoulderTiltDeg = math.atan2((p.ls.y - p.rs.y).abs(),
-                (p.ls.x - p.rs.x).abs().clamp(1e-6, double.infinity)) *
-            180 /
-            math.pi,
-        pelvisTilt = (p.lh.y - p.rh.y).abs() / b.thigh,
+        // 기울기 2개는 서 있을 때 값을 빼서 '더 기운 만큼'만 봄 (폰이 비뚤어도 영향 없음)
+        shoulderTiltDeg = (p.shoulderTiltSigned - b.shoulderTilt).abs(),
+        pelvisTilt = (p.pelvisTiltSigned - b.pelvisTilt).abs() / b.thigh,
         pelvisShift =
             b.ankleWidth > 0 ? (p.hipMid.x - b.hipMidX).abs() / b.ankleWidth : 0.0,
         torsoRatio = b.torso > 0 ? p.torsoHeight / b.torso : 1.0,
@@ -213,13 +225,13 @@ class FrameMetrics {
   static Level above(double v, Threshold t) =>
       v > t.error ? Level.error : (v > t.warning ? Level.warning : Level.ok);
 
-  Level get kneeCaving => below(kneeRatio, c.kneeCavingRatio);
+  Level kneeCaving(JudgeCriteria k) => below(kneeRatio, k.kneeCaving);
 
   /// 몸이 좌우로 기울어짐: 3개 지표 중 가장 나쁜 단계
-  Level get lateralTilt => _worst([
-        above(shoulderTiltDeg, c.shoulderTiltDeg),
-        above(pelvisTilt, c.pelvisTiltRatio),
-        above(pelvisShift, c.pelvisShiftRatio),
+  Level lateralTilt(JudgeCriteria k) => _worst([
+        above(shoulderTiltDeg, k.shoulderTilt),
+        above(pelvisTilt, k.pelvisTilt),
+        above(pelvisShift, k.pelvisShift),
       ]);
 
   Level get forwardLean => below(torsoRatio, c.forwardLeanRatio);
@@ -230,21 +242,29 @@ class FrameMetrics {
 Level _worst(Iterable<Level> levels) =>
     levels.fold(Level.ok, (a, b) => a.index >= b.index ? a : b);
 
-/// 연속 [n]프레임 이상 오류면 오류, 연속 [n]프레임 이상 주의 이상이면 주의
-Level sustainedLevel(List<Level> levels, {int n = c.consecutiveFrames}) {
-  final need = math.min(n, levels.length);
-  if (need == 0) return Level.ok;
-  int longest(bool Function(Level) hit) {
-    var best = 0, run = 0;
-    for (final l in levels) {
-      run = hit(l) ? run + 1 : 0;
-      if (run > best) best = run;
+/// 기준을 넘은 상태가 모드별 조건(초보자 0.3초 / 일반 연속 3프레임) 이상 이어지면 그 단계로 인정
+/// 구간 전체가 그보다 짧으면, 구간 전체가 기준을 넘을 때만 인정
+Level sustainedLevel(
+    List<FrameMetrics> frames, Level Function(FrameMetrics) levelOf, JudgeCriteria k) {
+  if (frames.isEmpty) return Level.ok;
+  bool hasRun(bool Function(Level) hit) {
+    var n = 0;
+    DateTime? start;
+    for (final f in frames) {
+      if (!hit(levelOf(f))) {
+        n = 0;
+        start = null;
+        continue;
+      }
+      n++;
+      start ??= f.time;
+      if (k.isSustained(n, f.time.difference(start)) || n == frames.length) return true;
     }
-    return best;
+    return false;
   }
 
-  if (longest((l) => l == Level.error) >= need) return Level.error;
-  if (longest((l) => l != Level.ok) >= need) return Level.warning;
+  if (hasRun((l) => l == Level.error)) return Level.error;
+  if (hasRun((l) => l != Level.ok)) return Level.warning;
   return Level.ok;
 }
 
@@ -294,14 +314,16 @@ class RuleRepResult {
 
 /// 엉덩이 높이로 앉았다 일어서는 것을 구분하고, 그 사이의 프레임으로 1회를 판정
 class RuleRepTracker {
-  RuleRepTracker(this.baseline);
+  RuleRepTracker(this.baseline, this.criteria);
 
   final StandingBaseline baseline;
+  final JudgeCriteria criteria; // 초보자 / 일반 모드 기준값
   final List<FrameMetrics> _frames = [];
   bool _isDown = false;
 
-  /// 실시간 피드백용: 항목별 연속 프레임 수
+  /// 실시간 피드백용: 항목별 연속 프레임 수와 시작 시각
   final Map<SquatFault, int> _liveRun = {};
+  final Map<SquatFault, DateTime> _liveSince = {};
 
   bool get isDown => _isDown;
 
@@ -364,25 +386,28 @@ class RuleRepTracker {
       // 너무 짧은 움직임은 떨림으로 보고 세지 않음
       _frames.clear();
       _liveRun.clear();
+      _liveSince.clear();
       return null;
     }
     final result = _judge();
     _frames.clear();
     _liveRun.clear();
+    _liveSince.clear();
     return result;
   }
 
   void _updateLive(FrameMetrics? m) {
     if (m == null) {
       _liveRun.clear();
+      _liveSince.clear();
       liveFault = null;
       liveLevel = Level.ok;
       return;
     }
     final now = <SquatFault, Level>{
-      SquatFault.kneeCaving: m.kneeCaving,
+      SquatFault.kneeCaving: m.kneeCaving(criteria),
       // 최저점 항목은 어느 정도 앉았을 때만 실시간으로 봄
-      if (m.hipDrop > 0.4) SquatFault.lateralTilt: m.lateralTilt,
+      if (m.hipDrop > 0.4) SquatFault.lateralTilt: m.lateralTilt(criteria),
       if (m.hipDrop > 0.4) SquatFault.forwardLean: m.forwardLean,
       if (m.hipDrop > 0.4) SquatFault.heelRaise: m.heel,
     };
@@ -390,8 +415,14 @@ class RuleRepTracker {
     var bestRank = 0;
     for (final f in SquatFault.values) {
       final l = now[f] ?? Level.ok;
-      _liveRun[f] = l == Level.ok ? 0 : (_liveRun[f] ?? 0) + 1;
-      if ((_liveRun[f] ?? 0) < c.consecutiveFrames) continue;
+      if (l == Level.ok) {
+        _liveRun[f] = 0;
+        _liveSince.remove(f);
+        continue;
+      }
+      _liveRun[f] = (_liveRun[f] ?? 0) + 1;
+      final since = _liveSince.putIfAbsent(f, () => m.time);
+      if (!criteria.isSustained(_liveRun[f]!, m.time.difference(since))) continue;
       // 순위: 판정 대상 오류 > 참고 오류 > 판정 대상 주의 > 참고 주의
       final rank = switch ((f.role, l)) {
         (CheckRole.judged, Level.error) => 4,
@@ -415,25 +446,25 @@ class RuleRepTracker {
     // 최저점 구간: 가장 깊은 곳에서 허벅지 길이의 5% 이내 프레임 (최소 3개)
     final deepest = _frames.map((f) => f.hipDrop).reduce(math.max);
     var bottom = _frames.where((f) => f.hipDrop >= deepest - 0.05).toList();
-    if (bottom.length < c.consecutiveFrames) {
+    if (bottom.length < c.depthSustainFrames) {
       bottom = (List.of(_frames)..sort((a, b) => b.hipDrop.compareTo(a.hipDrop)))
-          .take(c.consecutiveFrames)
+          .take(c.depthSustainFrames)
           .toList()
         ..sort((a, b) => a.time.compareTo(b.time));
     }
 
     // 깊이: 연속 3프레임 이상 유지한 깊이 = 3번째로 깊은 값
     final drops = _frames.map((f) => f.hipDrop).toList()..sort((a, b) => b.compareTo(a));
-    final sustainedDepth = drops[math.min(c.consecutiveFrames, drops.length) - 1];
+    final sustainedDepth = drops[math.min(c.depthSustainFrames, drops.length) - 1];
     // 흔들림으로 잘못 잡힌 반복은 버림 (실제로 앉은 깊이가 너무 얕음)
     if (sustainedDepth < c.repDownRatio) return null;
 
     final levels = <SquatFault, Level>{
-      SquatFault.kneeCaving: sustainedLevel(_frames.map((f) => f.kneeCaving).toList()),
-      SquatFault.shallowDepth: FrameMetrics.below(sustainedDepth, c.depthRatio),
-      SquatFault.lateralTilt: sustainedLevel(bottom.map((f) => f.lateralTilt).toList()),
-      SquatFault.forwardLean: sustainedLevel(bottom.map((f) => f.forwardLean).toList()),
-      SquatFault.heelRaise: sustainedLevel(bottom.map((f) => f.heel).toList()),
+      SquatFault.kneeCaving: sustainedLevel(_frames, (f) => f.kneeCaving(criteria), criteria),
+      SquatFault.shallowDepth: FrameMetrics.below(sustainedDepth, criteria.depth),
+      SquatFault.lateralTilt: sustainedLevel(bottom, (f) => f.lateralTilt(criteria), criteria),
+      SquatFault.forwardLean: sustainedLevel(bottom, (f) => f.forwardLean, criteria),
+      SquatFault.heelRaise: sustainedLevel(bottom, (f) => f.heel, criteria),
     };
 
     return RuleRepResult(

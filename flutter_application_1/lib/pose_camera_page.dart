@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
+import 'camera/input_image_util.dart';
 import 'pose_painter.dart';
 
 /// 카메라 실시간 스트림 → ML Kit Pose Detection → 화면 위에 뼈대 그리기
@@ -77,7 +78,7 @@ class _PoseCameraPageState extends State<PoseCameraPage>
 
   Future<void> _initCameras() async {
     try {
-      _cameras = await availableCameras();
+      _cameras = pickMainCameras(await availableCameras()); // 기본 카메라만 (광각 X)
       if (_cameras.isEmpty) {
         setState(() => _error = '사용 가능한 카메라가 없습니다.');
         return;

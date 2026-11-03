@@ -55,8 +55,8 @@ const heelRaiseRatio = Threshold(0.04, 0.07);
 // ───────────────────────── 2. 상체 오류 ─────────────────────────
 
 /// 몸이 좌우로 기울어짐 (3개 지표 중 하나라도 넘으면 해당) · 최저점 · 판정 대상
-const shoulderTiltDeg = Threshold(5, 10); // 어깨선이 수평에서 기운 각도(°)
-const pelvisTiltRatio = Threshold(0.08, 0.15); // 골반 좌우 높이 차 ÷ 서 있을 때 허벅지 길이
+const shoulderTiltDeg = Threshold(5, 10); // 어깨선이 서 있을 때보다 더 기운 각도(°)
+const pelvisTiltRatio = Threshold(0.08, 0.15); // 골반 좌우 높이 차(서 있을 때 대비) ÷ 서 있을 때 허벅지 길이
 const pelvisShiftRatio = Threshold(0.10, 0.20); // 골반 중심 옆 이동 ÷ 서 있을 때 발목 간격
 
 /// 몸이 앞으로 기울어짐: 최저점 상체 세로 길이 ÷ 서 있을 때 상체 길이 (작을수록 숙임) · 참고
@@ -64,8 +64,84 @@ const forwardLeanRatio = Threshold(0.65, 0.55);
 
 // ───────────────────────── 3. 판정 규칙 ─────────────────────────
 
-/// 연속 이 프레임 수 이상 기준을 넘어야 오류로 인정
+/// [일반 모드] 연속 이 프레임 수 이상 기준을 넘어야 오류로 인정
 const consecutiveFrames = 3;
+
+/// 깊이: 이 프레임 수 이상 유지한 깊이를 앉은 깊이로 봄 (두 모드 공통)
+/// ⚠️ 자세 오류 지속 시간과 따로 둠. 늘리면 오히려 깊이가 얕게 계산돼 오류가 늘어남
+const depthSustainFrames = 3;
+
+// ───────────────────────── 4. 판정 모드 (초보자 / 일반) ─────────────────────────
+
+/// DB 설정에 판정 모드를 저장하는 이름
+const kJudgeModeKey = 'judge_mode';
+
+/// 판정 모드
+enum JudgeMode {
+  beginner('초보자', '스쿼트를 처음 시작하는 분께 맞춘 기준이에요'),
+  standard('일반', '스쿼트에 익숙한 분을 위한 정확한 자세 기준이에요');
+
+  const JudgeMode(this.label, this.description);
+  final String label;
+  final String description;
+
+  /// DB에 저장된 이름 → 모드 (없거나 모르는 값이면 초보자)
+  static JudgeMode fromName(String? name) =>
+      JudgeMode.values.firstWhere((m) => m.name == name, orElse: () => JudgeMode.beginner);
+}
+
+/// 모드에 따라 달라지는 기준값. 여기 없는 항목(참고 항목, 보폭 등)은 두 모드 공통
+class JudgeCriteria {
+  const JudgeCriteria({
+    required this.kneeCaving,
+    required this.depth,
+    required this.shoulderTilt,
+    required this.pelvisTilt,
+    required this.pelvisShift,
+    this.sustainFrames,
+    this.sustainDuration,
+  });
+
+  final Threshold kneeCaving; // 다리 모아짐 (작을수록 나쁨)
+  final Threshold depth; // 무릎 덜 굽힘 (작을수록 나쁨)
+  final Threshold shoulderTilt; // 어깨 기울기(°) (클수록 나쁨)
+  final Threshold pelvisTilt; // 골반 좌우 높이 차 (클수록 나쁨)
+  final Threshold pelvisShift; // 골반 좌우 밀림 (클수록 나쁨)
+
+  /// 자세 오류 인정 조건: [sustainDuration]이 있으면 그 시간 이상 지속,
+  /// 없으면 연속 [sustainFrames]프레임 이상 (폰 속도에 따라 시간이 달라짐)
+  final int? sustainFrames;
+  final Duration? sustainDuration;
+
+  bool isSustained(int frames, Duration span) => sustainDuration != null
+      ? span >= sustainDuration!
+      : frames >= (sustainFrames ?? consecutiveFrames);
+
+  /// 일반 모드: 기획 판정 기준 v0.2 그대로
+  static const standard = JudgeCriteria(
+    kneeCaving: kneeCavingRatio,
+    depth: depthRatio,
+    shoulderTilt: shoulderTiltDeg,
+    pelvisTilt: pelvisTiltRatio,
+    pelvisShift: pelvisShiftRatio,
+    sustainFrames: consecutiveFrames,
+  );
+
+  /// 초보자 모드: 초보자용 판정 기준 완화안 (기획 제안서 + 검토 반영)
+  static const beginner = JudgeCriteria(
+    kneeCaving: Threshold(0.85, 0.65),
+    depth: Threshold(0.60, 0.45),
+    shoulderTilt: Threshold(8, 12),
+    pelvisTilt: Threshold(0.12, 0.22),
+    pelvisShift: Threshold(0.15, 0.30),
+    sustainDuration: Duration(milliseconds: 300), // 0.3초 이상 지속돼야 오류
+  );
+
+  static JudgeCriteria of(JudgeMode mode) => switch (mode) {
+        JudgeMode.beginner => beginner,
+        JudgeMode.standard => standard,
+      };
+}
 
 /// 관절 인식률이 이 값 미만인 프레임은 판정에서 제외
 const minVisibility = 0.5;

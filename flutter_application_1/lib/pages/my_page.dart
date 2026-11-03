@@ -71,6 +71,8 @@ class _MyPageState extends State<MyPage> {
       if (time != null && time.contains(':')) {
         final p = time.split(':');
         _reminderTime = TimeOfDay(hour: int.parse(p[0]), minute: int.parse(p[1]));
+      } else {
+        _reminderTime = const TimeOfDay(hour: 20, minute: 0); // 초기화 후 기본값
       }
       _loading = false;
     });
@@ -125,6 +127,67 @@ class _MyPageState extends State<MyPage> {
     final ampm = t.hour < 12 ? '오전' : '오후';
     final h = t.hour % 12 == 0 ? 12 : t.hour % 12;
     return '$ampm $h:${t.minute.toString().padLeft(2, '0')}';
+  }
+
+  // ---------------- 데이터 초기화 ----------------
+
+  Future<void> _resetData() async {
+    // 1) 무엇을 지울지 고르기
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('데이터 초기화'),
+        content: const Text('어떤 데이터를 지울까요?\n지운 데이터는 되돌릴 수 없어요.'),
+        actionsOverflowDirection: VerticalDirection.down,
+        actionsOverflowButtonSpacing: 4,
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'workouts'),
+            child: const Text('운동 기록만 삭제'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'all'),
+            style: TextButton.styleFrom(foregroundColor: AppColors.serious),
+            child: const Text('전체 초기화 (프로필·설정 포함)'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
+        ],
+      ),
+    );
+    if (choice == null || !mounted) return;
+
+    // 2) 한 번 더 확인 (실수로 누르는 것 방지)
+    final all = choice == 'all';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(all ? '전체 초기화할까요?' : '운동 기록을 모두 삭제할까요?'),
+        content: Text(all
+            ? '운동 기록, 프로필, 알림·판정 모드 설정이 모두 지워지고 앱을 처음 설치한 상태로 돌아가요.'
+            : '지금까지 쌓인 운동 기록이 모두 지워져요. 프로필과 설정은 그대로 남아요.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppColors.serious),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    if (all) {
+      await NotificationService.instance.cancelDaily(); // 예약된 운동 알림도 끔
+      await _db.resetAll();
+    } else {
+      await _db.deleteAllWorkouts();
+    }
+    // 화면은 dataChanged 신호로 자동으로 다시 불러옴
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(all ? '모든 데이터를 초기화했어요' : '운동 기록을 모두 삭제했어요'),
+    ));
   }
 
   // ---------------- 프로필 ----------------
@@ -284,6 +347,18 @@ class _MyPageState extends State<MyPage> {
                 onTap: _reminderOn ? _pickTime : null,
               ),
             ],
+          ),
+        ),
+
+        // ---------- 데이터 관리 ----------
+        const SectionTitle('데이터 관리'),
+        AppCard(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: ListTile(
+            leading: const Icon(Icons.delete_forever_outlined, color: AppColors.serious),
+            title: const Text('데이터 초기화', style: TextStyle(color: AppColors.serious)),
+            subtitle: const Text('쌓인 운동 기록이나 모든 데이터를 지워요'),
+            onTap: _resetData,
           ),
         ),
 

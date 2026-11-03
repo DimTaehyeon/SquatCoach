@@ -261,6 +261,32 @@ class AppDatabase {
     );
   }
 
+  // ---------------- 데이터 초기화 (마이페이지) ----------------
+
+  /// 운동 기록만 전부 삭제 (프로필·알림·판정 모드 설정은 유지)
+  Future<void> deleteAllWorkouts() async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('rep_records');
+      await txn.delete('workout_sets');
+      await txn.delete('workout_sessions');
+    });
+    notifyDataChanged();
+  }
+
+  /// 앱을 처음 설치한 상태로: 운동 기록 + 프로필 + 설정(알림, 판정 모드) 전부 삭제
+  Future<void> resetAll() async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('rep_records');
+      await txn.delete('workout_sets');
+      await txn.delete('workout_sessions');
+      await txn.delete('users');
+      await txn.delete('app_settings');
+    });
+    notifyDataChanged();
+  }
+
   /// 사용자·운동 기록 전부 삭제 (설정과 테이블 구조는 유지)
   Future<void> clearAll() async {
     final db = await database;
