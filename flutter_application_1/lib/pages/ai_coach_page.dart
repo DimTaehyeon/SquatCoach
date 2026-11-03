@@ -8,7 +8,7 @@ import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import '../ai/squat_classifier.dart';
 import '../ai/squat_features.dart';
 import '../camera/input_image_util.dart';
-import '../config/squat_criteria.dart' show Level, CheckRole;
+import '../config/squat_criteria.dart' show Level, CheckRole, JudgeMode, kJudgeModeKey;
 import '../db/app_database.dart';
 import '../pose_painter.dart';
 import '../ui/app_colors.dart';
@@ -55,6 +55,9 @@ class _WorkoutPageState extends State<WorkoutPage> with WidgetsBindingObserver {
   // 사물 오인식 방지: 사람처럼 보이는 프레임이 이만큼 연속돼야 판정 (30fps 기준 약 0.17초)
   static const _personFramesNeeded = 5;
   int _personFrames = 0;
+  // 앉을 때 인식이 풀리지 않게: 한 번 잡은 사람은 잠깐(약 0.3초) 놓쳐도 계속 추적
+  static const _maxMissedFrames = 10;
+  int _missedFrames = 0;
 
   @override
   void initState() {
@@ -82,10 +85,12 @@ class _WorkoutPageState extends State<WorkoutPage> with WidgetsBindingObserver {
   }
 
   Future<void> _init() async {
-    final user = await AppDatabase.instance.getOrCreateDefaultUser();
-    _workout = WorkoutController(userId: user.id!, weightKg: user.weightKg);
+    final db = AppDatabase.instance;
+    final user = await db.getOrCreateDefaultUser();
+    final mode = JudgeMode.fromName(await db.getSetting(kJudgeModeKey)); // 운동 탭에서 고른 모드
+    _workout = WorkoutController(userId: user.id!, weightKg: user.weightKg, mode: mode);
     try {
-      _cameras = await availableCameras();
+      _cameras = pickMainCameras(await availableCameras()); // 기본 카메라만 (광각 X)
       if (_cameras.isEmpty) {
         setState(() => _error = '사용 가능한 카메라가 없습니다.');
         return;
@@ -154,10 +159,23 @@ class _WorkoutPageState extends State<WorkoutPage> with WidgetsBindingObserver {
       final now = DateTime.now();
 
       final upright = uprightImageSize(meta.size, meta.rotation);
-      final isPerson =
-          poses.isNotEmpty && looksLikePerson(poses.first, upright);
-      _personFrames = isPerson ? _personFrames + 1 : 0;
-      final personReady = _personFrames >= _personFramesNeeded;
+      // 처음 잡을 때는 엄격하게(어깨~발목이 화면 높이의 30% 이상 → 사물 오인식 방지),
+      // 한 번 잡은 뒤에는 느슨하게(12% 이상). 앉으면 몸 높이가 거의 절반으로 줄어들기 때문
+      final tracking = _personFrames >= _personFramesNeeded;
+      final isPerson = poses.isNotEmpty &&
+          looksLikePerson(poses.first, upright,
+              minBodyRatio: tracking ? 0.12 : 0.3);
+      if (isPerson) {
+        _personFrames++;
+        _missedFrames = 0;
+      } else if (tracking && _missedFrames < _maxMissedFrames) {
+        _missedFrames++; // 잠깐 놓친 것으로 보고 추적 유지
+      } else {
+        _personFrames = 0;
+        _missedFrames = 0;
+      }
+      final personReady =
+          poses.isNotEmpty && _personFrames >= _personFramesNeeded;
 
       final wasCalibrating = workout.phase == WorkoutPhase.calibrating;
       final repDone =
@@ -361,7 +379,7 @@ class _WorkoutPageState extends State<WorkoutPage> with WidgetsBindingObserver {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              w.phase == WorkoutPhase.resting ? '휴식 중' : '세트 ${w.setNumber}',
+              '${w.phase == WorkoutPhase.resting ? '휴식 중' : '세트 ${w.setNumber}'} · ${w.mode.label} 모드',
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 18,

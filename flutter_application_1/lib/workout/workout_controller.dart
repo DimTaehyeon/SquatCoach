@@ -7,6 +7,7 @@ import '../ai/squat_features.dart';
 import '../ai/squat_rep_tracker.dart';
 import '../ai/squat_rule_engine.dart';
 import '../config/calories.dart';
+import '../config/squat_criteria.dart' show JudgeMode, JudgeCriteria;
 import '../db/app_database.dart';
 import '../models/workout_session.dart';
 
@@ -21,10 +22,15 @@ enum WorkoutPhase {
 /// 흐름: 영점 조절 → 세트 진행 → [세트 완료] → 휴식 → [다음 세트] → 영점 조절 …
 ///       → [운동 종료] → DB 저장 → 결과 화면
 class WorkoutController {
-  WorkoutController({required this.userId, required this.weightKg});
+  WorkoutController({
+    required this.userId,
+    required this.weightKg,
+    this.mode = JudgeMode.beginner,
+  });
 
   final int userId;
   final double weightKg;
+  final JudgeMode mode; // 초보자 / 일반 판정 모드
 
   final _calibrator = BaselineCalibrator();
   final _classifier = const SquatClassifier();
@@ -74,7 +80,7 @@ class WorkoutController {
         final b = _calibrator.add(body, now);
         if (b != null) {
           baseline = b;
-          _tracker = RuleRepTracker(b);
+          _tracker = RuleRepTracker(b, JudgeCriteria.of(mode));
           _ai.reset();
           phase = WorkoutPhase.active;
         }
