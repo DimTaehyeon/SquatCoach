@@ -127,13 +127,13 @@ class JudgeCriteria {
     sustainFrames: consecutiveFrames,
   );
 
-  /// 초보자 모드: 초보자용 판정 기준 완화안 (기획 제안서 + 검토 반영)
+  /// 초보자 모드: 초보자용 판정 기준표 (강현욱 2026-11-04)
   static const beginner = JudgeCriteria(
-    kneeCaving: Threshold(0.85, 0.65),
-    depth: Threshold(0.60, 0.45),
-    shoulderTilt: Threshold(8, 12),
-    pelvisTilt: Threshold(0.12, 0.22),
-    pelvisShift: Threshold(0.15, 0.30),
+    kneeCaving: Threshold(0.90, 0.75),
+    depth: Threshold(0.65, 0.50),
+    shoulderTilt: Threshold(6, 10),
+    pelvisTilt: Threshold(0.10, 0.18),
+    pelvisShift: Threshold(0.12, 0.22),
     sustainDuration: Duration(milliseconds: 300), // 0.3초 이상 지속돼야 오류
   );
 
@@ -164,6 +164,25 @@ const repReturnFraction = 0.35;
 const repSmoothFrames = 5;
 const repReturnFrames = 3;
 const minRepDuration = Duration(milliseconds: 600);
+
+/// 영점 자동 재조정 (세트 중에 사용자가 앞뒤·옆으로 자리를 옮겨도 계속 세기 위해)
+/// - [rebaselineStillTime] 동안 가만히 서 있고(엉덩이 흔들림 < [rebaselineStillRatio] × 허벅지),
+/// - 영점 때와 서 있는 높이·크기·좌우 위치가 아래 값 이상 달라졌으면 그 자리에서 영점을 다시 잡음
+const rebaselineStillTime = Duration(seconds: 1);
+const rebaselineStillRatio = 0.06;
+const rebaselineHeightDiff = 0.08; // 서 있는 엉덩이 높이 차 ÷ 허벅지
+const rebaselineScaleDiff = 0.10; // 허벅지 길이(= 카메라와의 거리) 변화 비율
+const rebaselineSideDiff = 0.15; // 좌우 이동 ÷ 발목 간격
+
+/// 1회 시작 판단용 '서 있는 높이'는 최근 이 시간 안의 가장 높은 자세로 봄
+const standingWindow = Duration(milliseconds: 1500);
+
+/// 걷기는 1회로 세지 않음: 앉았다 일어서는 동안
+/// - 발(양 발목 가운데)이 [walkFootMove] × 허벅지 길이 이상 움직였거나
+/// - 몸 크기(어깨 폭)가 [walkScaleChange]배 이상 바뀌었으면(카메라 쪽으로 다가오거나 멀어짐) 걷는 중으로 봄
+/// 시연 영상 측정: 실제 스쿼트는 발 이동 0.04~0.17, 크기 변화 1.04~1.15배 / 걷기는 0.52 이상, 1.62배 이상
+const walkFootMove = 0.35;
+const walkScaleChange = 1.35;
 
 /// 정면 확인: 어깨 너비가 허벅지 길이의 이 비율보다 작으면 옆으로 선 것으로 봄
 const minFrontalShoulderToThigh = 0.6;

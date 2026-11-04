@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
 import '../config/squat_criteria.dart' as c;
@@ -109,6 +111,27 @@ class StandingBaseline {
   final double pelvisTilt; // 서 있을 때 골반 좌우 높이 차(픽셀)
   final double? heelY;
 
+  /// 가만히 서 있는 여러 프레임의 평균으로 영점을 만듦
+  factory StandingBaseline.fromFrames(List<BodyPoints> frames) {
+    double avg(double Function(BodyPoints) f) =>
+        frames.map(f).reduce((a, b) => a + b) / frames.length;
+    final heels = frames.map((f) => f.heelY).whereType<double>().toList();
+    return StandingBaseline(
+      thigh: avg((f) => f.thigh),
+      shin: avg((f) => f.shin),
+      torso: avg((f) => f.torsoHeight),
+      ankleWidth: avg((f) => f.ankleWidth),
+      shoulderWidth: avg((f) => f.shoulderWidth),
+      hipMidX: avg((f) => f.hipMid.x),
+      hipMidY: avg((f) => f.hipMid.y),
+      shoulderTilt: avg((f) => f.shoulderTiltSigned),
+      pelvisTilt: avg((f) => f.pelvisTiltSigned),
+      heelY: heels.length >= frames.length / 2
+          ? heels.reduce((a, b) => a + b) / heels.length
+          : null,
+    );
+  }
+
   /// 다리 벌어짐(보폭) — 준비 자세에서 한 번 확인 (참고)
   Level get stanceLevel {
     if (shoulderWidth <= 0) return Level.ok;
@@ -170,23 +193,7 @@ class BaselineCalibrator {
       return null;
     }
 
-    double avg(double Function(BodyPoints) f) =>
-        _frames.map(f).reduce((a, b) => a + b) / _frames.length;
-    final heels = _frames.map((f) => f.heelY).whereType<double>().toList();
-    final baseline = StandingBaseline(
-      thigh: avg((f) => f.thigh),
-      shin: avg((f) => f.shin),
-      torso: avg((f) => f.torsoHeight),
-      ankleWidth: avg((f) => f.ankleWidth),
-      shoulderWidth: avg((f) => f.shoulderWidth),
-      hipMidX: avg((f) => f.hipMid.x),
-      hipMidY: avg((f) => f.hipMid.y),
-      shoulderTilt: avg((f) => f.shoulderTiltSigned),
-      pelvisTilt: avg((f) => f.pelvisTiltSigned),
-      heelY: heels.length >= _frames.length / 2
-          ? heels.reduce((a, b) => a + b) / heels.length
-          : null,
-    );
+    final baseline = StandingBaseline.fromFrames(_frames);
     reset();
     return baseline;
   }
@@ -204,6 +211,9 @@ class FrameMetrics {
         pelvisShift =
             b.ankleWidth > 0 ? (p.hipMid.x - b.hipMidX).abs() / b.ankleWidth : 0.0,
         torsoRatio = b.torso > 0 ? p.torsoHeight / b.torso : 1.0,
+        footX = p.la.mid(p.ra).x,
+        footY = p.la.mid(p.ra).y,
+        shoulderWidthPx = p.shoulderWidth,
         heelRise = (b.heelY != null && p.heelY != null)
             ? (b.heelY! - p.heelY!) / b.shin
             : null;
@@ -215,6 +225,8 @@ class FrameMetrics {
   final double pelvisTilt;
   final double pelvisShift;
   final double torsoRatio; // 상체 세로 길이 ÷ 서 있을 때 상체 길이
+  final double footX, footY; // 양 발목 가운데 (픽셀) — 걷기 판별용
+  final double shoulderWidthPx; // 어깨 폭 (픽셀) — 카메라와 거리 변화 판별용
   final double? heelRise;
 
   /// 작을수록 나쁜 값
@@ -316,7 +328,11 @@ class RuleRepResult {
 class RuleRepTracker {
   RuleRepTracker(this.baseline, this.criteria);
 
-  final StandingBaseline baseline;
+  /// 영점. 세트 중에 사용자가 자리를 옮기면 서 있을 때 자동으로 다시 잡음
+  StandingBaseline baseline;
+
+  /// 세트 중 영점을 다시 잡은 횟수 (확인용)
+  int rebaselineCount = 0;
   final JudgeCriteria criteria; // 초보자 / 일반 모드 기준값
   final List<FrameMetrics> _frames = [];
   bool _isDown = false;
@@ -331,7 +347,10 @@ class RuleRepTracker {
   SquatFault? liveFault;
   Level liveLevel = Level.ok;
 
-  double _top = double.infinity; // 직전에 서 있던 높이 (hipDrop 최솟값)
+  double _top = double.infinity; // 최근 [c.standingWindow] 동안 서 있던 높이 (hipDrop 최솟값)
+  double _repTop = 0; // 이번 반복을 시작하기 직전의 서 있던 높이
+  final List<(DateTime, double)> _standLevels = []; // 서 있는 동안의 (시각, 높이)
+  final List<(DateTime, BodyPoints)> _standBodies = []; // 영점 재조정용 서 있는 자세
   double _peak = 0; // 이번 반복에서 가장 깊이 내려간 값
 
   // 중복 카운트 방지
@@ -356,9 +375,15 @@ class RuleRepTracker {
     final h = _smoothedDrop(m.hipDrop);
 
     if (!_isDown) {
-      if (h < _top) _top = h;
+      // 서 있는 높이 = 최근 1.5초 중 가장 높은 자세 (예전 값에 영원히 묶이지 않게)
+      _standLevels.add((now, h));
+      _standLevels.removeWhere((e) => now.difference(e.$1) > c.standingWindow);
+      _top = _standLevels.map((e) => e.$2).reduce(math.min);
+
       if (h - _top > c.repDownRatio) {
         _isDown = true;
+        _repTop = _top;
+        _standBodies.clear();
         _peak = h;
         _upFrames = 0;
         _downAt = now;
@@ -366,6 +391,7 @@ class RuleRepTracker {
           ..clear()
           ..add(m);
       }
+      if (!_isDown) _maybeRebaseline(body, now); // 서 있을 때만 영점 재조정 확인
       _updateLive(null);
       return null;
     }
@@ -374,16 +400,24 @@ class RuleRepTracker {
     if (h > _peak) _peak = h;
     _updateLive(m);
 
-    final returned = h < _top + c.repReturnFraction * (_peak - _top);
+    final returned = h < _repTop + c.repReturnFraction * (_peak - _repTop);
     _upFrames = returned ? _upFrames + 1 : 0;
     if (_upFrames < c.repReturnFrames) return null; // 몇 프레임 연속으로 올라와 있어야 인정
 
     _isDown = false;
-    _top = h;
+    _standLevels.clear();
     _upFrames = 0;
     final tooFast = _downAt != null && now.difference(_downAt!) < c.minRepDuration;
     if (tooFast) {
       // 너무 짧은 움직임은 떨림으로 보고 세지 않음
+      _frames.clear();
+      _liveRun.clear();
+      _liveSince.clear();
+      return null;
+    }
+    if (_isWalking()) {
+      // 자리를 옮기며 낮아진 움직임은 스쿼트가 아님
+      debugPrint('[횟수] 걷는 움직임이라 세지 않음');
       _frames.clear();
       _liveRun.clear();
       _liveSince.clear();
@@ -394,6 +428,56 @@ class RuleRepTracker {
     _liveRun.clear();
     _liveSince.clear();
     return result;
+  }
+
+  /// 이번 반복 동안 발이 움직였거나 카메라와 거리가 크게 바뀌었으면 걷는 중
+  bool _isWalking() {
+    if (_frames.length < 2) return false;
+    double range(Iterable<double> v) => v.reduce(math.max) - v.reduce(math.min);
+    final footMove = math.max(range(_frames.map((f) => f.footX)), range(_frames.map((f) => f.footY)));
+    final widths = _frames.map((f) => f.shoulderWidthPx).where((w) => w > 0);
+    final scale = widths.isEmpty ? 1.0 : widths.reduce(math.max) / widths.reduce(math.min);
+    return footMove / baseline.thigh > c.walkFootMove || scale > c.walkScaleChange;
+  }
+
+  /// 가만히 서 있는데 영점 때와 위치·거리가 달라졌으면 지금 자리로 영점을 다시 잡음. 다시 잡았으면 true
+  bool _maybeRebaseline(BodyPoints body, DateTime now) {
+    // 정면을 보고 있을 때만 (옆으로 돌아서 걸어가는 중이면 X)
+    if (body.shoulderWidth < body.thigh * c.minFrontalShoulderToThigh) {
+      _standBodies.clear();
+      return false;
+    }
+    _standBodies.add((now, body));
+    _standBodies.removeWhere((e) => now.difference(e.$1) > c.rebaselineStillTime);
+    if (_standBodies.length < 8 ||
+        now.difference(_standBodies.first.$1) <
+            c.rebaselineStillTime - const Duration(milliseconds: 100)) {
+      return false;
+    }
+
+    // 1초 동안 엉덩이가 거의 움직이지 않았는지
+    final ys = _standBodies.map((e) => e.$2.hipMid.y);
+    final thigh = _standBodies.first.$2.thigh;
+    if (thigh <= 0 || (ys.reduce(math.max) - ys.reduce(math.min)) / thigh > c.rebaselineStillRatio) {
+      return false;
+    }
+
+    final cand = StandingBaseline.fromFrames(_standBodies.map((e) => e.$2).toList());
+    final b = baseline;
+    final moved = (cand.hipMidY - b.hipMidY).abs() / b.thigh > c.rebaselineHeightDiff ||
+        (cand.thigh / b.thigh - 1).abs() > c.rebaselineScaleDiff ||
+        (b.ankleWidth > 0 && (cand.hipMidX - b.hipMidX).abs() / b.ankleWidth > c.rebaselineSideDiff);
+    if (!moved) return false;
+
+    baseline = cand;
+    rebaselineCount++;
+    // 단위가 바뀌었으니 높이 기록은 새로 시작
+    _recentDrops.clear();
+    _standLevels.clear();
+    _standBodies.clear();
+    _top = double.infinity;
+    debugPrint('[영점] 자리 이동 감지 → 영점 다시 잡음 ($rebaselineCount번째)');
+    return true;
   }
 
   void _updateLive(FrameMetrics? m) {
@@ -455,7 +539,10 @@ class RuleRepTracker {
 
     // 깊이: 연속 3프레임 이상 유지한 깊이 = 3번째로 깊은 값
     final drops = _frames.map((f) => f.hipDrop).toList()..sort((a, b) => b.compareTo(a));
-    final sustainedDepth = drops[math.min(c.depthSustainFrames, drops.length) - 1];
+    // 영점이 아니라 '이번 반복 직전에 서 있던 높이'에서 얼마나 내려갔는지로 잼
+    // (자리를 옮겨 영점이 조금 어긋나도 깊이가 틀어지지 않게)
+    final sustainedDepth =
+        drops[math.min(c.depthSustainFrames, drops.length) - 1] - _repTop;
     // 흔들림으로 잘못 잡힌 반복은 버림 (실제로 앉은 깊이가 너무 얕음)
     if (sustainedDepth < c.repDownRatio) return null;
 
