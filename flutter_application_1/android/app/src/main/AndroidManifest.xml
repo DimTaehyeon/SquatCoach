@@ -6,6 +6,8 @@
     <uses-feature android:name="android.hardware.camera" android:required="true"/>
     <application
         android:label="SquatCoach"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -57,6 +59,10 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- 음성 안내(TTS): Android 11 이상에서 TTS 엔진을 찾기 위해 필요 -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE"/>
         </intent>
     </queries>
 </manifest>
