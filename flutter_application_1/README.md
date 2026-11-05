@@ -31,7 +31,7 @@ flutter doctor
 git clone https://github.com/DimTaehyeon/SquatCoach.git
 cd SquatCoach
 git checkout main          # 아직 합쳐지기 전이면 ai-coach
-cd flutter_application_1
+cd squatcoach
 flutter pub get
 ```
 
@@ -110,3 +110,28 @@ lib/
 └─ services/                 알림
 test/python_parity_test.dart Python(학습) ↔ Dart(앱) 계산 일치 확인: flutter test
 ```
+
+---
+## 프론트엔드 병합 (lib/front)
+백엔드 앱(자세 인식·판정·DB)을 그대로 두고, 프론트엔드의 Figma 화면을 `lib/front` 아래에 얹었습니다.
+
+- 진입점: `lib/main.dart` (프론트 화면 흐름) — 예전 탭 화면(`lib/pages/*`, `lib/ui`)은 쓰이지 않고 남겨 둠
+- 화면: `lib/front/screens` (스플래시 → 프로필 → 목표 → 권한 → 사용법 → 홈/운동/기록/마이)
+- 운동 화면: `lib/front/screens/analysis_screen.dart` — 카메라 프레임을 `WorkoutController`에 넘기고 결과를 표시
+- 상태: `lib/front/providers/session_provider.dart` — `WorkoutController` 상태를 화면에 전달, 세트/횟수/휴식 설정, 판정 모드(초보자/일반)
+- 기록: 백엔드 SQLite → `lib/front/repositories/db_workout_repository.dart` 가 화면용 모델로 변환 (정확도 = 정자세 ÷ 전체)
+- 프로필: shared_preferences (이름·성별·목표·키·몸무게·사진·알림 시각). 알림은 백엔드 `NotificationService` 사용
+- 백엔드 코드 수정: `WorkoutController.discardCurrentSet()` 한 개만 추가 ("이번 세트 다시 하기")
+- 개발자 도구: 마이페이지 프로필 카드 길게 누르기
+- 음성 안내(TTS)는 이번 병합에서 제외
+
+## 오류 소리 안내 (경고음 + 음성)
+- `lib/front/services/alert_coach.dart` — 판정 대상 오류(다리 모아짐/무릎 덜 굽힘/몸 기울어짐)만 소리로 알림, 참고 항목은 화면 문구만
+- 규칙: 한 번 앉는 동안 같은 오류 1회, 어떤 소리든 2.5초 간격, 같은 오류는 6초 간격 (값은 `AlertCoach` 상수)
+- 켜고 끄기: 운동 화면 우상단 스피커 아이콘 / 마이페이지 "운동 중 안내" (음성, 경고음 각각)
+- 횟수 읽기: 정자세로 1회를 끝낼 때마다 "하나, 둘…"(정자세 횟수 기준). 오류가 난 회는 세지 않고 경고음+오류 음성만. 음성 안내 스위치를 끄면 횟수도 읽지 않음
+- 시작 카운트다운(3-2-1): 첫 시작과 휴식 뒤 다음 세트 시작 때 `/countdown` 화면 → 끝나면 영점 조절 시작
+
+## 화면 흐름 (Figma 복원)
+카메라 준비(실제 카메라로 전신·정면·밝기 확인) → 3-2-1 카운트다운 → 운동 분석(영점 조절 → 세트) ⇄ 일시정지 → 휴식 → 카운트다운 → … → 결과
+영점 조절 중 12초 넘게 몸이 안 보이면 '인식 실패' 화면이 뜹니다.

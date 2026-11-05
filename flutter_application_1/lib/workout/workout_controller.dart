@@ -139,6 +139,15 @@ class WorkoutController {
     phase = WorkoutPhase.resting;
   }
 
+  /// 지금 세트를 버리고 영점부터 다시 시작 (프론트의 "이번 세트 다시 하기")
+  void discardCurrentSet() {
+    currentReps.clear();
+    _setStartedAt = null;
+    lastRep = null;
+    lastRepAt = null;
+    restartCalibration();
+  }
+
   /// 다음 세트 시작 (판정 기준 문서: 세트 시작 전 2초 영점)
   void startNextSet() => restartCalibration();
 
